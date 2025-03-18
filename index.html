@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Aquisição de Dados – MicroSEAL (WebSocket Real) – Filtro de Média Móvel</title>
+  
+  <!-- Estilos -->
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://code.jquery.com/ui/1.13.2/themes/base/jquery-ui.css">
+  
+  <!-- Bibliotecas externas -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://code.jquery.com/ui/1.13.2/jquery-ui.min.js"></script>
+</head>
+<body>
+  <h1>Aquisição de Dados – MicroSEAL (WebSocket Real) – Filtro de Média Móvel</h1>
+  
+  <!-- Área de controles -->
+  <div id="controls">
+    <label for="ipAddress">IP do Conversor:</label>
+    <input type="text" id="ipAddress" value="192.168.16.200" style="width:150px;">
+    
+    <label for="deviceIds">IDs dos dispositivos (separados por vírgula):</label>
+    <input type="text" id="deviceIds" value="1,2,3,4" style="width:200px;">
+    
+    <button id="connect" class="btn">Conectar à Ethernet</button>
+    <button id="sendRequest" class="btn" disabled>Enviar Leitura (manual)</button>
+    <button id="toggleRecording" class="btn" disabled>Iniciar Gravação</button>
+    <span id="recording-indicator">● GRAVANDO</span>
+    <button id="exportData" class="btn">Exportar Dados (CSV)</button>
+    <button id="clearData" class="btn">Limpar Dados</button>
+    <button id="exportLog" class="btn">Exportar Log</button>
+    <button id="showHistory" class="btn">Mostrar Histórico</button>
+    <button id="exportHistory" class="btn">Exportar Histórico (HTML)</button>
+    <button id="btnChangeBg" class="btn">Mudar Fundo</button>
+    
+    <!-- Intervalo de atualização -->
+    <select id="updateInterval" class="btn">
+      <option value="200">0.2s</option>
+      <option value="250" selected>0.25s</option>
+      <option value="500">0.5s</option>
+      <option value="1000">1s</option>
+      <option value="2000">2s</option>
+      <option value="5000">5s</option>
+    </select>
+    
+    <!-- Parâmetros manuais -->
+    <div style="margin-top: 10px;">
+      <strong>Parâmetros Manuais</strong><br>
+      <label for="manualBaudRate">Baud Rate:</label>
+      <select id="manualBaudRate" class="btn" disabled>
+        <option value="9600" selected>9600</option>
+        <option value="19200">19200</option>
+        <option value="38400">38400</option>
+      </select>
+      <label for="manualParity">Paridade:</label>
+      <select id="manualParity" class="btn" disabled>
+        <option value="none" selected>Nenhuma</option>
+        <option value="even">Par</option>
+        <option value="odd">Ímpar</option>
+      </select>
+      <label for="manualStopBits">Stop Bits:</label>
+      <select id="manualStopBits" class="btn" disabled>
+        <option value="1" selected>1</option>
+        <option value="2">2</option>
+      </select>
+      <button id="applyManualParams" class="btn" disabled>Aplicar Parâmetros</button>
+    </div>
+  </div>
+  
+  <!-- Área para mensagens -->
+  <div id="messages"></div>
+  
+  <!-- Área para os gráficos -->
+  <div id="devices"></div>
+  
+  <!-- Console de debug -->
+  <div id="debug"></div>
+  
+  <!-- Modal para histórico -->
+  <div id="historyModal" style="display:none;"></div>
+  
+  <!-- Script principal -->
+  <script src="main.js"></script>
+</body>
+</html>
