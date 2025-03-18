@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Aquisição de Dados – MicroSEAL (WebSocket Real) – Filtro de Média Móvel</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    #controls { margin-bottom: 20px; }
+    /* Mensagens e layout */
+    #messages { margin-bottom: 10px; font-weight: bold; color: green; }
+    #devices { display: grid; grid-template-columns: repeat(2, 1fr); grid-gap: 10px; margin-top: 20px; }
+    .device-container { border: 1px solid #ccc; padding: 10px; box-sizing: border-box; }
+    .device-header { font-weight: bold; margin-bottom: 10px; }
+    .readings { background: #f0f0f0; padding: 5px; margin-top: 10px; font-size: 0.9em; }
+    .reading { margin-bottom: 5px; }
+    .chart-canvas { width: 100%; height: 35vh; border: 1px solid #ccc; margin-top: 10px; }
+    #debug { position: fixed; bottom: 0; right: 0; background: rgba(0,0,0,0.7); color: #fff; padding: 10px; max-width: 300px; max-height: 200px; overflow: auto; font-family: monospace; font-size: 0.8em; z-index: 9999; }
+    .btn { padding: 5px 10px; margin-left: 5px; font-size: 0.9em; }
+    .recording { background-color: #ff6347; color: white; }
+    #recording-indicator { display: none; color: red; font-weight: bold; margin-left: 10px; animation: blink 1s infinite; }
+    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+  </style>
+  
+  <!-- Bibliotecas externas -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <link rel="stylesheet" href="https://code.jquery.com/ui/1.13.2/themes/base/jquery-ui.css">
+  <script src="https://code.jquery.com/ui/1.13.2/jquery-ui.min.js"></script>
+</head>
+<body>
+  <h1>Aquisição de Dados – MicroSEAL (WebSocket Real) – Filtro de Média Móvel</h1>
+  
+  <!-- Área de controles -->
+  <div id="controls">
+    <label for="ipAddress">IP do Conversor:</label>
+    <input type="text" id="ipAddress" value="192.168.16.200" style="width:150px;">
+    
+    <label for="deviceIds">IDs dos dispositivos (separados por vírgula):</label>
+    <input type="text" id="deviceIds" value="1,2,3,4" style="width:200px;">
+    
+    <button id="connect" class="btn">Conectar à Ethernet</button>
+    <button id="sendRequest" class="btn" disabled>Enviar Leitura (manual)</button>
+    <button id="toggleRecording" class="btn" disabled>Iniciar Gravação</button>
+    <span id="recording-indicator">● GRAVANDO</span>
+    <button id="exportData" class="btn">Exportar Dados (CSV)</button>
+    <button id="clearData" class="btn">Limpar Dados</button>
+    <button id="exportLog" class="btn">Exportar Log</button>
+    <button id="showHistory" class="btn">Mostrar Histórico</button>
+    <button id="exportHistory" class="btn">Exportar Histórico (HTML)</button>
+    <button id="btnChangeBg" class="btn">Mudar Fundo</button>
+    
+    <!-- Intervalo de atualização -->
+    <select id="updateInterval" class="btn">
+      <option value="200">0.2s</option>
+      <option value="250" selected>0.25s</option>
+      <option value="500">0.5s</option>
+      <option value="1000">1s</option>
+      <option value="2000">2s</option>
+      <option value="5000">5s</option>
+    </select>
+    
+    <!-- Parâmetros manuais (mantidos para a interface, não usados nesta configuração) -->
+    <div style="margin-top: 10px;">
+      <strong>Parâmetros Manuais</strong><br>
+      <label for="manualBaudRate">Baud Rate:</label>
+      <select id="manualBaudRate" class="btn" disabled>
+        <option value="9600" selected>9600</option>
+        <option value="19200">19200</option>
+        <option value="38400">38400</option>
+      </select>
+      <label for="manualParity">Paridade:</label>
+      <select id="manualParity" class="btn" disabled>
+        <option value="none" selected>Nenhuma</option>
+        <option value="even">Par</option>
+        <option value="odd">Ímpar</option>
+      </select>
+      <label for="manualStopBits">Stop Bits:</label>
+      <select id="manualStopBits" class="btn" disabled>
+        <option value="1" selected>1</option>
+        <option value="2">2</option>
+      </select>
+      <button id="applyManualParams" class="btn" disabled>Aplicar Parâmetros</button>
+    </div>
+  </div>
+  
+  <!-- Área para mensagens -->
+  <div id="messages"></div>
+  
+  <!-- Área para os gráficos -->
+  <div id="devices"></div>
+  
+  <!-- Console de debug -->
+  <div id="debug"></div>
+  
+  <!-- Modal para histórico -->
+  <div id="historyModal" style="display:none;"></div>
+  
+  <script>
+    (function() {
+      "use strict";
+      
+      // Variáveis globais
+      let wsSocket = null;  // Gerenciará a conexão WebSocket real
+      let deviceIds = [];
+      let charts = {};
+      let readings = {};
+      let isRunning = false;
+      let debugBuffer = [];
+      let updateInterval = 250;
+      let isRecording = false;
+      let recordedData = [];
+      let deviceHistory = {};
+      let communicationLog = [];
+      let isReadingInProgress = false;
+      let transactionId = 0;
+      let ipUsed = ""; // IP do conversor
+      
+      // Objeto para requisições pendentes (chave: Transaction ID)
+      const pendingRequests = {};
+      
+      // Elementos DOM
+      const connectButton = document.getElementById('connect');
+      const sendRequestButton = document.getElementById('sendRequest');
+      const toggleRecordingButton = document.getElementById('toggleRecording');
+      const recordingIndicator = document.getElementById('recording-indicator');
+      const exportDataButton = document.getElementById('exportData');
+      const clearDataButton = document.getElementById('clearData');
+      const exportLogButton = document.getElementById('exportLog');
+      const showHistoryButton = document.getElementById('showHistory');
+      const exportHistoryButton = document.getElementById('exportHistory');
+      const btnChangeBg = document.getElementById('btnChangeBg');
+      const updateIntervalSelect = document.getElementById('updateInterval');
+      
+      // Função auxiliar: delay
+      function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+      }
+      
+      // Função para mudar o fundo da página
+      function changeBackground() {
+        const color = prompt("Digite a cor desejada (ex.: lightblue, #ff0000, etc.):");
+        if (color) document.body.style.backgroundColor = color;
+      }
+      btnChangeBg.addEventListener('click', changeBackground);
+      
+      // Funções de log
+      function logDebug(message) {
+        const time = new Date().toLocaleTimeString();
+        debugBuffer.push(`[${time}] ${message}`);
+        if (debugBuffer.length > 100) { debugBuffer.shift(); }
+        document.getElementById('debug').innerHTML = debugBuffer.join('<br>');
+        document.getElementById('debug').scrollTop = document.getElementById('debug').scrollHeight;
+        addToCommunicationLog("DEBUG", message);
+      }
+      
+      function addToCommunicationLog(direction, message) {
+        const timestamp = new Date().toISOString();
+        communicationLog.push({ timestamp, direction, message });
+      }
+      
+      // Gera o próximo Transaction ID
+      function getNextTransactionId() {
+        transactionId = (transactionId + 1) % 65536;
+        return transactionId;
+      }
+      
+      // Constrói o frame de requisição Modbus TCP (função 03)
+      function buildModbusTCPRequest(deviceId, startAddress, quantity) {
+        const tid = getNextTransactionId();
+        const protocolId = 0x0000;
+        const length = 6; // 6 bytes: Unit ID + Function + Start Address (2) + Quantity (2)
+        const request = new Uint8Array(12);
+        request[0] = (tid >> 8) & 0xFF;
+        request[1] = tid & 0xFF;
+        request[2] = (protocolId >> 8) & 0xFF;
+        request[3] = protocolId & 0xFF;
+        request[4] = (length >> 8) & 0xFF;
+        request[5] = length & 0xFF;
+        request[6] = deviceId;
+        request[7] = 3;
+        request[8] = (startAddress >> 8) & 0xFF;
+        request[9] = startAddress & 0xFF;
+        request[10] = (quantity >> 8) & 0xFF;
+        request[11] = quantity & 0xFF;
+        return request;
+      }
+      
+      // Processa a resposta Modbus TCP
+      function parseModbusTCPResponse(response) {
+        if (response.length < 9) return { error: "Resposta muito curta" };
+        const tid = (response[0] << 8) | response[1];
+        const protocolId = (response[2] << 8) | response[3];
+        const length = (response[4] << 8) | response[5];
+        const unitId = response[6];
+        const functionCode = response[7];
+        if (functionCode & 0x80) {
+          const exceptionCode = response[8];
+          return { error: `Erro Modbus: Função ${functionCode & 0x7F}, Código ${exceptionCode}` };
+        }
+        if (functionCode === 3) {
+          const byteCount = response[8];
+          if (response.length < 9 + byteCount) {
+            return { error: "Dados incompletos" };
+          }
+          const data = response.slice(9, 9 + byteCount);
+          return { transactionId: tid, unitId, functionCode, byteCount, data };
+        }
+        return { error: `Função não suportada: ${functionCode}` };
+      }
+      
+      // Converte bytes para string hexadecimal
+      function bytesToHexString(bytes) {
+        return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      }
+      
+      // Processamento dos registros (cada registro = 2 bytes)
+      function parseRegisterValue(highByte, lowByte) {
+        let value = (highByte << 8) | lowByte;
+        if (value & 0x8000) { value -= 0x10000; }
+        return value;
+      }
+      
+      function processS15STHMQData(frame) {
+        if (!frame || !frame.data || frame.data.length < 10) return null;
+        const humidityRaw = parseRegisterValue(frame.data[0], frame.data[1]);
+        const humidity = humidityRaw / 100;
+        const tempCRaw = parseRegisterValue(frame.data[2], frame.data[3]);
+        const temperatureC = tempCRaw * 0.05;
+        const tempFRaw = parseRegisterValue(frame.data[4], frame.data[5]);
+        const temperatureF = tempFRaw * 0.05;
+        const dewCRaw = parseRegisterValue(frame.data[6], frame.data[7]);
+        const dewPointC = dewCRaw / 100;
+        const dewFRaw = parseRegisterValue(frame.data[8], frame.data[9]);
+        const dewPointF = dewFRaw / 100;
+        return { humidity, temperatureC, temperatureF, dewPointC, dewPointF };
+      }
+      
+      function processS15CUMQData(frame) {
+        if (!frame || !frame.data || frame.data.length < 2) return null;
+        const raw = parseRegisterValue(frame.data[0], frame.data[1]);
+        const voltage = raw / 1000;
+        return { voltage };
+      }
+      
+      // IMPLEMENTAÇÃO REAL COM WEBSOCKET
+      // Cria a conexão WebSocket usando as configurações do conversor:
+      // O conversor está configurado para operar como WebSocket Client, enviando os dados para:
+      // ws://192.168.16.200:8080/v1
+      function createEthernetSocket(ip) {
+        return new Promise((resolve, reject) => {
+          const ws = new WebSocket("ws://" + ip + ":8080/v1");
+          ws.binaryType = "arraybuffer";
+          
+          ws.onopen = function() {
+            logDebug("WebSocket conectado a " + ip);
+            resolve({
+              ws: ws,
+              isConnected: true,
+              // Método request: envia um frame e aguarda a resposta correlacionada pelo Transaction ID
+              request: function(data) {
+                return new Promise((resolveReq, rejectReq) => {
+                  const tid = (data[0] << 8) | data[1];
+                  pendingRequests[tid] = {
+                    resolve: resolveReq,
+                    reject: rejectReq,
+                    timeout: setTimeout(() => {
+                      delete pendingRequests[tid];
+                      rejectReq(new Error("Timeout aguardando resposta para TID " + tid));
+                    }, 5000)
+                  };
+                  ws.send(data);
+                });
+              },
+              close: function() {
+                ws.close();
+              }
+            });
+          };
+          
+          ws.onerror = function(event) {
+            logDebug("WebSocket error: " + event);
+            reject(new Error("Erro na conexão WebSocket"));
+          };
+          
+          ws.onmessage = function(event) {
+            const data = new Uint8Array(event.data);
+            const tid = (data[0] << 8) | data[1];
+            if (pendingRequests[tid]) {
+              clearTimeout(pendingRequests[tid].timeout);
+              pendingRequests[tid].resolve(data);
+              delete pendingRequests[tid];
+            } else {
+              logDebug("Recebida resposta com TID desconhecido: " + tid);
+            }
+          };
+          
+          ws.onclose = function() {
+            logDebug("Conexão WebSocket fechada.");
+          };
+        });
+      }
+      
+      // Cria containers e gráficos para os dispositivos
+      function createDeviceContainer(deviceId) {
+        const container = document.createElement("div");
+        container.className = "device-container";
+        container.id = "device-" + deviceId;
+        const header = document.createElement("div");
+        header.className = "device-header";
+        header.innerText = `Dispositivo ${deviceId}`;
+        container.appendChild(header);
+        const canvas = document.createElement("canvas");
+        canvas.id = "chart-" + deviceId;
+        canvas.className = "chart-canvas";
+        container.appendChild(canvas);
+        const readingsDiv = document.createElement("div");
+        readingsDiv.id = "readings-" + deviceId;
+        readingsDiv.className = "readings";
+        container.appendChild(readingsDiv);
+        document.getElementById("devices").appendChild(container);
+        $("#" + canvas.id).draggable().resizable();
+      }
+      
+      function initChartForDevice(deviceId) {
+        const ctx = document.getElementById("chart-" + deviceId).getContext("2d");
+        let datasets;
+        if (deviceId === 4) {
+          datasets = [
+            { label: `Umidade (%RH) - Dispositivo ${deviceId}`, data: [], borderColor: 'rgba(54, 162, 235, 1)', backgroundColor: 'rgba(54, 162, 235, 0.2)' },
+            { label: `Temp (°C) - Dispositivo ${deviceId}`, data: [], borderColor: 'rgba(255, 99, 132, 1)', backgroundColor: 'rgba(255, 99, 132, 0.2)' },
+            { label: `Temp (°F) - Dispositivo ${deviceId}`, data: [], borderColor: 'rgba(255, 159, 64, 1)', backgroundColor: 'rgba(255, 159, 64, 0.2)' },
+            { label: `D.P. (°C) - Dispositivo ${deviceId}`, data: [], borderColor: 'rgba(75, 192, 192, 1)', backgroundColor: 'rgba(75, 192, 192, 0.2)' },
+            { label: `D.P. (°F) - Dispositivo ${deviceId}`, data: [], borderColor: 'rgba(153, 102, 255, 1)', backgroundColor: 'rgba(153, 102, 255, 0.2)' }
+          ];
+        } else {
+          datasets = [
+            { label: `Tensão (VDC) - Dispositivo ${deviceId}`, data: [], borderColor: 'rgba(54, 162, 235, 1)', backgroundColor: 'rgba(54, 162, 235, 0.2)' }
+          ];
+        }
+        const chartOptions = {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 50 },
+          scales: {
+            x: { title: { display: true, text: 'Tempo' } },
+            y: { title: { display: true, text: 'Valor' } }
+          }
+        };
+        if (deviceId !== 4) {
+          chartOptions.scales.y.min = 0;
+          chartOptions.scales.y.max = 10;
+        }
+        const chartConfig = {
+          type: 'line',
+          data: { labels: [], datasets: datasets },
+          options: chartOptions
+        };
+        charts[deviceId] = new Chart(ctx, chartConfig);
+      }
+      
+      // Função de filtragem: média móvel dos últimos 5 valores
+      function getMovingAverage(deviceId, fieldName, windowSize = 5) {
+        const data = readings[deviceId] || [];
+        if (data.length === 0) return 0;
+        const windowData = data.slice(-windowSize);
+        const sum = windowData.reduce((acc, reading) => acc + (reading[fieldName] || 0), 0);
+        return sum / windowData.length;
+      }
+      
+      // Atualiza o gráfico usando os valores suavizados
+      function updateChartForDevice(deviceId, sensorData) {
+        const chart = charts[deviceId];
+        if (!chart) return;
+        const now = new Date();
+        const timeLabel = now.toLocaleTimeString();
+        chart.data.labels.push(timeLabel);
+        if (deviceId === 4) {
+          chart.data.datasets[0].data.push(getMovingAverage(deviceId, 'humidity'));
+          chart.data.datasets[1].data.push(getMovingAverage(deviceId, 'temperatureC'));
+          chart.data.datasets[2].data.push(getMovingAverage(deviceId, 'temperatureF'));
+          chart.data.datasets[3].data.push(getMovingAverage(deviceId, 'dewPointC'));
+          chart.data.datasets[4].data.push(getMovingAverage(deviceId, 'dewPointF'));
+        } else {
+          chart.data.datasets[0].data.push(getMovingAverage(deviceId, 'voltage'));
+        }
+        if (chart.data.labels.length > 500) {
+          chart.data.labels.shift();
+          chart.data.datasets.forEach(dataset => dataset.data.shift());
+        }
+        chart.update();
+      }
+      
+      function updateDisplayForDevice(deviceId) {
+        const readingsDiv = document.getElementById("readings-" + deviceId);
+        if (!readingsDiv) return;
+        readingsDiv.innerHTML = "";
+        const deviceReadings = readings[deviceId] || [];
+        const displayReadings = deviceReadings.slice(-3);
+        displayReadings.forEach((reading, index) => {
+          const div = document.createElement("div");
+          div.className = "reading";
+          let text = "";
+          if (deviceId === 4) {
+            text = `Leitura ${index + 1} (${reading.timestamp.toLocaleTimeString()}): ` +
+                   `Umidade: ${reading.humidity.toFixed(2)} %RH | Temp (°C): ${reading.temperatureC.toFixed(2)} | ` +
+                   `Temp (°F): ${reading.temperatureF.toFixed(2)} | D.P. (°C): ${reading.dewPointC.toFixed(2)} | ` +
+                   `D.P. (°F): ${reading.dewPointF.toFixed(2)}`;
+          } else {
+            text = `Leitura ${index + 1} (${reading.timestamp.toLocaleTimeString()}): Tensão: ${reading.voltage.toFixed(3)} VDC`;
+          }
+          div.innerText = text;
+          readingsDiv.appendChild(div);
+        });
+      }
+      
+      // Loop de requisições para todos os dispositivos via WebSocket
+      async function sendRequestsForAllDevices() {
+        if (!isRunning) return;
+        if (isReadingInProgress) {
+          setTimeout(sendRequestsForAllDevices, updateInterval);
+          return;
+        }
+        isReadingInProgress = true;
+        try {
+          for (let deviceId of deviceIds) {
+            try {
+              const requestFrame = buildModbusTCPRequest(deviceId, 0, deviceId === 4 ? 5 : 1);
+              logDebug(`Enviando para ${deviceId}: ${bytesToHexString(requestFrame)}`);
+              addToCommunicationLog("ENVIO", `Dispositivo ${deviceId}: ${bytesToHexString(requestFrame)}`);
+              const responseBytes = await wsSocket.request(requestFrame);
+              if (!responseBytes) {
+                logDebug(`Dispositivo ${deviceId}: tempo esgotado.`);
+                continue;
+              }
+              logDebug(`Recebido de ${deviceId}: ${bytesToHexString(responseBytes)}`);
+              addToCommunicationLog("RECEPÇÃO", `Dispositivo ${deviceId}: ${bytesToHexString(responseBytes)}`);
+              const frame = parseModbusTCPResponse(responseBytes);
+              if (frame.error) {
+                logDebug(`Dispositivo ${deviceId}: erro no frame (${frame.error}).`);
+                continue;
+              }
+              let sensorData;
+              if (deviceId === 4) {
+                sensorData = processS15STHMQData(frame);
+              } else {
+                sensorData = processS15CUMQData(frame);
+              }
+              if (sensorData) {
+                sensorData.deviceId = frame.unitId;
+                sensorData.timestamp = new Date();
+                if (!readings[frame.unitId]) readings[frame.unitId] = [];
+                readings[frame.unitId].push(sensorData);
+                addToRecording(frame.unitId, sensorData);
+                if (readings[frame.unitId].length > 50) { readings[frame.unitId].shift(); }
+                updateDisplayForDevice(frame.unitId);
+                updateChartForDevice(frame.unitId, sensorData);
+              }
+            } catch (error) {
+              logDebug(`Erro ao ler dispositivo ${deviceId}: ${error.message}`);
+            }
+            await sleep(20);
+          }
+        } finally {
+          isReadingInProgress = false;
+        }
+        setTimeout(sendRequestsForAllDevices, updateInterval);
+      }
+      
+      // Funções de gravação e exportação
+      function addToRecording(deviceId, sensorData) {
+        if (!isRecording) return;
+        const recordEntry = { timestamp: new Date().toISOString(), deviceId, ...sensorData };
+        recordedData.push(recordEntry);
+        if (!deviceHistory[deviceId]) deviceHistory[deviceId] = [];
+        deviceHistory[deviceId].push(recordEntry);
+      }
+      
+      function exportData() {
+        const header = "deviceId,timestamp,humidity,temperatureC,temperatureF,dewPointC,dewPointF,voltage\n";
+        let csvContent = header;
+        recordedData.forEach(reading => {
+          const ts = (typeof reading.timestamp === 'string') ? reading.timestamp : reading.timestamp.toISOString();
+          let line = "";
+          if (reading.voltage !== undefined) {
+            line = `${reading.deviceId},${ts},,,,,${reading.voltage}\n`;
+          } else {
+            line = `${reading.deviceId},${ts},${reading.humidity},${reading.temperatureC},${reading.temperatureF},${reading.dewPointC},${reading.dewPointF},\n`;
+          }
+          csvContent += line;
+        });
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `dados_exportados_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      
+      function exportCommunicationLog() {
+        const header = "timestamp,direction,message\n";
+        let csvContent = header;
+        communicationLog.forEach(entry => {
+          const msg = entry.message.replace(/"/g, '""');
+          csvContent += `${entry.timestamp},${entry.direction},"${msg}"\n`;
+        });
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `communication_log_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      
+      function exportHistoryAsHTML() {
+        let html = `
+          <!DOCTYPE html>
+          <html lang="pt-BR">
+          <head>
+            <meta charset="UTF-8">
+            <title>Histórico de Dados Exportado</title>
+            <style>
+              table { width: 100%; border-collapse: collapse; }
+              th, td { border: 1px solid #ccc; padding: 5px; text-align: center; }
+              th { background: #f0f0f0; }
+            </style>
+          </head>
+          <body>
+            <h1>Histórico de Dados Exportado</h1>
+        `;
+        for (let deviceId in deviceHistory) {
+          html += `<h2>Dispositivo ${deviceId}</h2>`;
+          if (deviceHistory[deviceId].length === 0) {
+            html += "<p>Nenhum dado registrado.</p>";
+            continue;
+          }
+          html += "<table><tr>";
+          if (parseInt(deviceId) === 4) {
+            html += "<th>Timestamp</th><th>Umidade (%RH)</th><th>Temp (°C)</th><th>Temp (°F)</th><th>D.P. (°C)</th><th>D.P. (°F)</th>";
+          } else {
+            html += "<th>Timestamp</th><th>Tensão (VDC)</th>";
+          }
+          html += "</tr>";
+          deviceHistory[deviceId].forEach(reading => {
+            html += "<tr>";
+            html += `<td>${new Date(reading.timestamp).toLocaleString()}</td>`;
+            if (parseInt(deviceId) === 4) {
+              html += `<td>${reading.humidity ? reading.humidity.toFixed(2) : ""}</td>`;
+              html += `<td>${reading.temperatureC ? reading.temperatureC.toFixed(2) : ""}</td>`;
+              html += `<td>${reading.temperatureF ? reading.temperatureF.toFixed(2) : ""}</td>`;
+              html += `<td>${reading.dewPointC ? reading.dewPointC.toFixed(2) : ""}</td>`;
+              html += `<td>${reading.dewPointF ? reading.dewPointF.toFixed(2) : ""}</td>`;
+            } else {
+              html += `<td>${reading.voltage ? reading.voltage.toFixed(3) : ""}</td>`;
+            }
+            html += "</tr>";
+          });
+          html += "</table>";
+        }
+        html += "</body></html>";
+        const blob = new Blob([html], { type: "text/html;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `historico_exportado_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.html`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      
+      // Exportação periódica a cada 30 minutos
+      function periodicExport() {
+        if (recordedData.length > 0) {
+          exportData();
+          recordedData = [];
+          logDebug("Exportação periódica realizada e dados limpos da memória.");
+        }
+      }
+      setInterval(periodicExport, 1800000);
+      
+      function showHistory() {
+        let html = "";
+        for (let deviceId in deviceHistory) {
+          html += `<h2>Dispositivo ${deviceId}</h2>`;
+          if (deviceHistory[deviceId].length === 0) {
+            html += "<p>Nenhum dado registrado.</p>";
+            continue;
+          }
+          html += "<table border='1' cellpadding='5' cellspacing='0' style='width:100%; border-collapse: collapse;'>";
+          if (parseInt(deviceId) === 4) {
+            html += "<tr><th>Timestamp</th><th>Umidade (%RH)</th><th>Temp (°C)</th><th>Temp (°F)</th><th>D.P. (°C)</th><th>D.P. (°F)</th></tr>";
+            deviceHistory[deviceId].forEach(reading => {
+              html += `<tr>
+                <td>${new Date(reading.timestamp).toLocaleString()}</td>
+                <td>${reading.humidity ? reading.humidity.toFixed(2) : ""}</td>
+                <td>${reading.temperatureC ? reading.temperatureC.toFixed(2) : ""}</td>
+                <td>${reading.temperatureF ? reading.temperatureF.toFixed(2) : ""}</td>
+                <td>${reading.dewPointC ? reading.dewPointC.toFixed(2) : ""}</td>
+                <td>${reading.dewPointF ? reading.dewPointF.toFixed(2) : ""}</td>
+              </tr>`;
+            });
+          } else {
+            html += "<tr><th>Timestamp</th><th>Tensão (VDC)</th></tr>";
+            deviceHistory[deviceId].forEach(reading => {
+              html += `<tr>
+                <td>${new Date(reading.timestamp).toLocaleString()}</td>
+                <td>${reading.voltage ? reading.voltage.toFixed(3) : ""}</td>
+              </tr>`;
+            });
+          }
+          html += "</table>";
+        }
+        const modal = document.getElementById("historyModal");
+        modal.innerHTML = html;
+        $(modal).dialog({
+          width: 600,
+          height: 400,
+          modal: true,
+          title: "Histórico de Dados"
+        });
+      }
+      
+      // Eventos e gerenciamento da conexão WebSocket real
+      connectButton.addEventListener('click', async () => {
+        try {
+          deviceIds = document.getElementById('deviceIds').value
+            .split(",").map(s => parseInt(s.trim()))
+            .filter(id => !isNaN(id));
+          if (deviceIds.length === 0) {
+            alert("Insira pelo menos um ID válido.");
+            return;
+          }
+          // Lê o IP informado (padrão: 192.168.16.200)
+          const ipField = document.getElementById('ipAddress');
+          ipUsed = ipField.value.trim() || "192.168.16.200";
+          // Cria containers e gráficos para cada dispositivo
+          document.getElementById("devices").innerHTML = "";
+          for (let id of deviceIds) {
+            createDeviceContainer(id);
+            initChartForDevice(id);
+            readings[id] = [];
+          }
+          // Abre a conexão WebSocket com o conversor na porta 8080 e path /v1
+          wsSocket = await createEthernetSocket(ipUsed);
+          document.getElementById('messages').innerHTML = `<div>Conexão estabelecida com o conversor em ${ipUsed}!</div>`;
+          sendRequestButton.disabled = false;
+          toggleRecordingButton.disabled = false;
+          isRunning = true;
+          sendRequestsForAllDevices();
+        } catch (error) {
+          document.getElementById('messages').innerHTML = `<div style="color:red;">Erro ao conectar: ${error.message}</div>`;
+          console.error("Erro ao conectar:", error);
+        }
+      });
+      
+      sendRequestButton.addEventListener('click', async () => {
+        const wasRunning = isRunning;
+        isRunning = false;
+        if (!wsSocket || !wsSocket.isConnected) {
+          alert("Conexão não estabelecida.");
+          return;
+        }
+        if (isReadingInProgress) {
+          alert("Leitura em andamento. Tente novamente em instantes.");
+          return;
+        }
+        isReadingInProgress = true;
+        try {
+          for (let deviceId of deviceIds) {
+            try {
+              const requestFrame = buildModbusTCPRequest(deviceId, 0, deviceId === 4 ? 5 : 1);
+              logDebug(`Leitura manual - Enviando para ${deviceId}: ${bytesToHexString(requestFrame)}`);
+              addToCommunicationLog("ENVIO", `Leitura manual - Dispositivo ${deviceId}: ${bytesToHexString(requestFrame)}`);
+              const responseBytes = await wsSocket.request(requestFrame);
+              if (!responseBytes) {
+                logDebug(`Leitura manual - Dispositivo ${deviceId}: tempo esgotado.`);
+                continue;
+              }
+              logDebug(`Leitura manual - Recebido de ${deviceId}: ${bytesToHexString(responseBytes)}`);
+              addToCommunicationLog("RECEPÇÃO", `Leitura manual - Dispositivo ${deviceId}: ${bytesToHexString(responseBytes)}`);
+              const frame = parseModbusTCPResponse(responseBytes);
+              if (frame.error) {
+                logDebug(`Leitura manual - Dispositivo ${deviceId}: erro no frame (${frame.error}).`);
+                continue;
+              }
+              let sensorData;
+              if (deviceId === 4) {
+                sensorData = processS15STHMQData(frame);
+              } else {
+                sensorData = processS15CUMQData(frame);
+              }
+              if (sensorData) {
+                sensorData.deviceId = frame.unitId;
+                sensorData.timestamp = new Date();
+                if (!readings[frame.unitId]) readings[frame.unitId] = [];
+                readings[frame.unitId].push(sensorData);
+                addToRecording(frame.unitId, sensorData);
+                if (readings[frame.unitId].length > 50) { readings[frame.unitId].shift(); }
+                updateDisplayForDevice(frame.unitId);
+                updateChartForDevice(frame.unitId, sensorData);
+              }
+            } catch (error) {
+              logDebug(`Leitura manual - Erro ao ler dispositivo ${deviceId}: ${error.message}`);
+            }
+            await sleep(10);
+          }
+        } finally {
+          isReadingInProgress = false;
+          isRunning = wasRunning;
+          if (wasRunning) {
+            setTimeout(sendRequestsForAllDevices, updateInterval);
+          }
+        }
+      });
+      
+      toggleRecordingButton.addEventListener('click', () => {
+        isRecording = !isRecording;
+        if (isRecording) {
+          recordedData = [];
+          deviceHistory = {};
+          deviceIds.forEach(id => deviceHistory[id] = []);
+          toggleRecordingButton.textContent = "Parar Gravação";
+          toggleRecordingButton.classList.add("recording");
+          recordingIndicator.style.display = "inline";
+          logDebug("Gravação iniciada.");
+        } else {
+          toggleRecordingButton.textContent = "Iniciar Gravação";
+          toggleRecordingButton.classList.remove("recording");
+          recordingIndicator.style.display = "none";
+          logDebug(`Gravação finalizada. ${recordedData.length} registros gravados.`);
+          if (recordedData.length > 0 && confirm(`Gravação finalizada com ${recordedData.length} registros. Deseja exportar os dados agora?`)) {
+            exportData();
+          }
+        }
+      });
+      
+      exportDataButton.addEventListener('click', exportData);
+      
+      clearDataButton.addEventListener('click', () => {
+        readings = {};
+        for (let id of deviceIds) {
+          if (charts[id]) {
+            charts[id].data.labels = [];
+            charts[id].data.datasets.forEach(dataset => dataset.data = []);
+            charts[id].update();
+          }
+          const readingsDiv = document.getElementById("readings-" + id);
+          if (readingsDiv) readingsDiv.innerHTML = "";
+        }
+        if (!isRecording) { recordedData = []; }
+        logDebug("Dados limpos.");
+      });
+      
+      exportLogButton.addEventListener('click', exportCommunicationLog);
+      showHistoryButton.addEventListener('click', showHistory);
+      exportHistoryButton.addEventListener('click', exportHistoryAsHTML);
+      
+      updateIntervalSelect.addEventListener('change', () => {
+        updateInterval = parseInt(updateIntervalSelect.value);
+        logDebug(`Intervalo de atualização alterado para ${updateInterval}ms`);
+      });
+      
+      window.addEventListener('beforeunload', () => {
+        isRunning = false;
+        if (wsSocket && wsSocket.isConnected) {
+          wsSocket.close();
+        }
+      });
+      
+    })();
+  </script>
+</body>
+</html>
